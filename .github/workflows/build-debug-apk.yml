@@ -1,4 +1,4 @@
-name: Build debug APK and publish download page
+name: Build debug APK and publish prerelease
 
 on:
   workflow_dispatch:
@@ -10,20 +10,15 @@ on:
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 concurrency:
-  group: mms-swahili-tts-pages
+  group: mms-swahili-tts-releases
   cancel-in-progress: false
 
 jobs:
   build-and-publish:
-    name: Build, prerelease, and Pages download page
+    name: Build and publish prerelease
     runs-on: ubuntu-24.04
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
       - name: Check out source and LFS assets
@@ -72,7 +67,7 @@ jobs:
           APK=dist/MmsSwahiliTtsEngine-debug.apk
           MODEL_ASSET=assets/mms-swh-vits.onnx
           EXPECTED_MODEL_SHA256=af4f2e2174960af06a7a7d07810ea7eb2d78fba827be7690abb230159717d250
-          mkdir -p dist site
+          mkdir -p dist
           cp "$APK_SOURCE" "$APK"
           "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" | grep -F "package: name='com.negi.mmsswahilitts'"
           unzip -Z1 "$APK" | grep -Fx "$MODEL_ASSET"
@@ -92,7 +87,25 @@ jobs:
             echo "build_date=$BUILD_DATE"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Create debug prerelease and upload APK
+      - name: Create QR code for the release APK
+        env:
+          TAG: ${{ steps.metadata.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          QR_VENV="$RUNNER_TEMP/qr-venv"
+          QR_ASSET=dist/MmsSwahiliTtsEngine-download-qr.png
+          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/MmsSwahiliTtsEngine-debug.apk"
+          python3 -m venv "$QR_VENV"
+          "$QR_VENV/bin/python" -m pip install --disable-pip-version-check --no-cache-dir 'qrcode[pil]==8.2'
+          "$QR_VENV/bin/python" - "$DOWNLOAD_URL" "$QR_ASSET" <<'PY'
+          import qrcode
+          import sys
+          qrcode.make(sys.argv[1]).save(sys.argv[2])
+          PY
+          test -s "$QR_ASSET"
+
+      - name: Create debug prerelease and upload assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.metadata.outputs.tag }}
@@ -105,8 +118,14 @@ jobs:
           set -euo pipefail
           TITLE="MMS Swahili TTS debug ${TAG}"
           if [[ -n "$TITLE_SUFFIX" ]]; then TITLE="$TITLE — $TITLE_SUFFIX"; fi
+          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/MmsSwahiliTtsEngine-debug.apk"
+          QR_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/MmsSwahiliTtsEngine-download-qr.png"
           cat > dist/release-notes.md <<EOF
           Debug APK built from commit ${GITHUB_SHA} at ${BUILD_DATE}.
+
+          [Download the debug APK](${DOWNLOAD_URL})
+
+          ![QR code for the debug APK download](${QR_URL})
 
           APK SHA-256: \`${APK_SHA256}\`
 
@@ -115,61 +134,9 @@ jobs:
           This APK bundles Meta's MMS Swahili model, licensed CC BY-NC 4.0.
           It is for non-commercial use only; see the repository provenance documentation.
           EOF
-          gh release create "$TAG" dist/MmsSwahiliTtsEngine-debug.apk dist/MmsSwahiliTtsEngine-debug.apk.sha256 \
+          gh release create "$TAG" dist/MmsSwahiliTtsEngine-debug.apk dist/MmsSwahiliTtsEngine-debug.apk.sha256 dist/MmsSwahiliTtsEngine-download-qr.png \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --prerelease \
             --title "$TITLE" \
             --notes-file dist/release-notes.md
-
-      - name: Create QR code and download page
-        env:
-          TAG: ${{ steps.metadata.outputs.tag }}
-          APK_SHA256: ${{ steps.metadata.outputs.apk_sha256 }}
-          VERSION_NAME: ${{ steps.metadata.outputs.version_name }}
-          VERSION_CODE: ${{ steps.metadata.outputs.version_code }}
-          BUILD_DATE: ${{ steps.metadata.outputs.build_date }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          QR_VENV="$RUNNER_TEMP/qr-venv"
-          python3 -m venv "$QR_VENV"
-          "$QR_VENV/bin/python" -m pip install --disable-pip-version-check --no-cache-dir 'qrcode[pil]==8.2'
-          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/MmsSwahiliTtsEngine-debug.apk"
-          "$QR_VENV/bin/python" - "$DOWNLOAD_URL" <<'PY'
-          import qrcode
-          import sys
-          qrcode.make(sys.argv[1]).save("site/mms-swahili-tts-download-qr.png")
-          PY
-          cat > site/index.html <<EOF
-          <!doctype html>
-          <html lang="en">
-          <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MMS Swahili TTS download</title></head>
-          <body>
-          <main>
-          <h1>MMS Swahili TTS Engine</h1>
-          <p><a href="${DOWNLOAD_URL}">Download debug APK</a></p>
-          <p><img src="mms-swahili-tts-download-qr.png" alt="QR code for the APK download" width="280" height="280"></p>
-          <dl>
-            <dt>Build date</dt><dd>${BUILD_DATE}</dd>
-            <dt>Commit</dt><dd><code>${GITHUB_SHA}</code></dd>
-            <dt>Version</dt><dd>${VERSION_NAME} (${VERSION_CODE})</dd>
-            <dt>APK SHA-256</dt><dd><code>${APK_SHA256}</code></dd>
-          </dl>
-          <p>This APK bundles the Meta MMS Swahili model under CC BY-NC 4.0. Non-commercial use only.</p>
-          </main>
-          </body>
-          </html>
-          EOF
-
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload GitHub Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-
-      - name: Deploy GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4

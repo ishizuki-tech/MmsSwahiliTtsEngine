@@ -47,7 +47,7 @@ comparison is required before making a voice-quality claim.
 
 ## Debug APK distribution
 
-The manual GitHub Actions workflow builds a verified debug APK, publishes it as a prerelease
-asset, and deploys a QR-code download page without a `gh-pages` branch. See
-[docs/RELEASE_AUTOMATION.md](docs/RELEASE_AUTOMATION.md) for the required first-time Pages
-configuration and distribution restrictions.
+The manual GitHub Actions workflow builds a verified debug APK and publishes a unique GitHub
+prerelease containing the APK, SHA-256 sidecar, and a QR PNG that links directly to the APK.
+See [docs/RELEASE_AUTOMATION.md](docs/RELEASE_AUTOMATION.md) for triggering and distribution
+restrictions.
