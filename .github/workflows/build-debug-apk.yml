@@ -1,0 +1,175 @@
+name: Build debug APK and publish download page
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_title:
+        description: Optional title suffix for the prerelease
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: mms-swahili-tts-pages
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    name: Build, prerelease, and Pages download page
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Check out source and LFS assets
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          fetch-depth: 0
+
+      - name: Set up Java required by Gradle
+        uses: actions/setup-java@v5
+        with:
+          distribution: jetbrains
+          java-version: "25"
+          cache: gradle
+
+      - name: Set up Android SDK and compileSdk 36
+        uses: android-actions/setup-android@v3
+
+      - name: Install required Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Verify the LFS model asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL=app/src/main/assets/mms-swh-vits.onnx
+          EXPECTED_BYTES=114017796
+          EXPECTED_SHA256=af4f2e2174960af06a7a7d07810ea7eb2d78fba827be7690abb230159717d250
+          test "$(stat --format=%s "$MODEL")" = "$EXPECTED_BYTES"
+          test "$(sha256sum "$MODEL" | awk '{print $1}')" = "$EXPECTED_SHA256"
+
+      - name: Build and run JVM tests
+        shell: bash
+        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug --no-daemon
+
+      - name: Verify APK contents and capture metadata
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK_SOURCE=app/build/outputs/apk/debug/app-debug.apk
+          APK=dist/MmsSwahiliTtsEngine-debug.apk
+          MODEL_ASSET=assets/mms-swh-vits.onnx
+          EXPECTED_MODEL_SHA256=af4f2e2174960af06a7a7d07810ea7eb2d78fba827be7690abb230159717d250
+          mkdir -p dist site
+          cp "$APK_SOURCE" "$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$APK" | grep -F "package: name='com.negi.mmsswahilitts'"
+          unzip -Z1 "$APK" | grep -Fx "$MODEL_ASSET"
+          unzip -p "$APK" "$MODEL_ASSET" | sha256sum | awk '{print $1}' > dist/model-asset.sha256
+          test "$(cat dist/model-asset.sha256)" = "$EXPECTED_MODEL_SHA256"
+          APK_SHA256=$(sha256sum "$APK" | awk '{print $1}')
+          VERSION_NAME=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts)
+          VERSION_CODE=$(sed -n 's/.*versionCode = \([0-9][0-9]*\).*/\1/p' app/build.gradle.kts)
+          TAG="debug-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::12}"
+          BUILD_DATE=$(date --utc +%Y-%m-%dT%H:%M:%SZ)
+          printf '%s\n' "$APK_SHA256" > dist/MmsSwahiliTtsEngine-debug.apk.sha256
+          {
+            echo "tag=$TAG"
+            echo "apk_sha256=$APK_SHA256"
+            echo "version_name=$VERSION_NAME"
+            echo "version_code=$VERSION_CODE"
+            echo "build_date=$BUILD_DATE"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create debug prerelease and upload APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.metadata.outputs.tag }}
+          TITLE_SUFFIX: ${{ inputs.release_title }}
+          APK_SHA256: ${{ steps.metadata.outputs.apk_sha256 }}
+          VERSION_NAME: ${{ steps.metadata.outputs.version_name }}
+          BUILD_DATE: ${{ steps.metadata.outputs.build_date }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TITLE="MMS Swahili TTS debug ${TAG}"
+          if [[ -n "$TITLE_SUFFIX" ]]; then TITLE="$TITLE — $TITLE_SUFFIX"; fi
+          cat > dist/release-notes.md <<EOF
+          Debug APK built from commit ${GITHUB_SHA} at ${BUILD_DATE}.
+
+          APK SHA-256: \`${APK_SHA256}\`
+
+          Version: ${VERSION_NAME}
+
+          This APK bundles Meta's MMS Swahili model, licensed CC BY-NC 4.0.
+          It is for non-commercial use only; see the repository provenance documentation.
+          EOF
+          gh release create "$TAG" dist/MmsSwahiliTtsEngine-debug.apk dist/MmsSwahiliTtsEngine-debug.apk.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "$TITLE" \
+            --notes-file dist/release-notes.md
+
+      - name: Create QR code and download page
+        env:
+          TAG: ${{ steps.metadata.outputs.tag }}
+          APK_SHA256: ${{ steps.metadata.outputs.apk_sha256 }}
+          VERSION_NAME: ${{ steps.metadata.outputs.version_name }}
+          VERSION_CODE: ${{ steps.metadata.outputs.version_code }}
+          BUILD_DATE: ${{ steps.metadata.outputs.build_date }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          QR_VENV="$RUNNER_TEMP/qr-venv"
+          python3 -m venv "$QR_VENV"
+          "$QR_VENV/bin/python" -m pip install --disable-pip-version-check --no-cache-dir 'qrcode[pil]==8.2'
+          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/MmsSwahiliTtsEngine-debug.apk"
+          "$QR_VENV/bin/python" - "$DOWNLOAD_URL" <<'PY'
+          import qrcode
+          import sys
+          qrcode.make(sys.argv[1]).save("site/mms-swahili-tts-download-qr.png")
+          PY
+          cat > site/index.html <<EOF
+          <!doctype html>
+          <html lang="en">
+          <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MMS Swahili TTS download</title></head>
+          <body>
+          <main>
+          <h1>MMS Swahili TTS Engine</h1>
+          <p><a href="${DOWNLOAD_URL}">Download debug APK</a></p>
+          <p><img src="mms-swahili-tts-download-qr.png" alt="QR code for the APK download" width="280" height="280"></p>
+          <dl>
+            <dt>Build date</dt><dd>${BUILD_DATE}</dd>
+            <dt>Commit</dt><dd><code>${GITHUB_SHA}</code></dd>
+            <dt>Version</dt><dd>${VERSION_NAME} (${VERSION_CODE})</dd>
+            <dt>APK SHA-256</dt><dd><code>${APK_SHA256}</code></dd>
+          </dl>
+          <p>This APK bundles the Meta MMS Swahili model under CC BY-NC 4.0. Non-commercial use only.</p>
+          </main>
+          </body>
+          </html>
+          EOF
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

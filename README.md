@@ -44,3 +44,10 @@ separate rights. See [docs/MODEL_PROVENANCE.md](docs/MODEL_PROVENANCE.md).
 
 This project does not claim a quality advantage over any other engine. A controlled listening
 comparison is required before making a voice-quality claim.
+
+## Debug APK distribution
+
+The manual GitHub Actions workflow builds a verified debug APK, publishes it as a prerelease
+asset, and deploys a QR-code download page without a `gh-pages` branch. See
+[docs/RELEASE_AUTOMATION.md](docs/RELEASE_AUTOMATION.md) for the required first-time Pages
+configuration and distribution restrictions.
