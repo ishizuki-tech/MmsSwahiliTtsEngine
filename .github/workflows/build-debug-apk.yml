@@ -34,15 +34,34 @@ jobs:
           java-version: "25"
           cache: gradle
 
-      - name: Set up Android SDK and compileSdk 36
-        uses: android-actions/setup-android@v3
-
-      - name: Install required Android SDK packages
+      - name: Install and verify required Android SDK packages
         shell: bash
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses >/dev/null
-          sdkmanager --install "platforms;android-36" "build-tools;36.0.0"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [[ ! -x "$SDKMANAGER" ]]; then
+            SDKMANAGER=""
+            for candidate in "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager; do
+              if [[ -x "$candidate" ]]; then
+                SDKMANAGER="$candidate"
+                break
+              fi
+            done
+          fi
+          if [[ -z "$SDKMANAGER" ]]; then
+            echo "No executable SDK Manager found under $ANDROID_HOME/cmdline-tools." >&2
+            echo "Expected cmdline-tools/latest/bin/sdkmanager or a versioned equivalent." >&2
+            find "$ANDROID_HOME/cmdline-tools" -maxdepth 3 -type f -name sdkmanager -print >&2 || true
+            exit 1
+          fi
+          echo "Using Android SDK Manager: $SDKMANAGER"
+          "$SDKMANAGER" --version
+          set +o pipefail
+          yes | "$SDKMANAGER" --licenses >/dev/null
+          set -o pipefail
+          "$SDKMANAGER" --install "platforms;android-36" "build-tools;36.0.0"
+          test -d "$ANDROID_HOME/platforms/android-36"
+          test -x "$ANDROID_HOME/build-tools/36.0.0/aapt"
 
       - name: Verify the LFS model asset
         shell: bash
