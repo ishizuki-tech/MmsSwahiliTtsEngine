@@ -51,3 +51,11 @@ The manual GitHub Actions workflow builds a verified debug APK and publishes a u
 prerelease containing the APK, SHA-256 sidecar, and a QR PNG that links directly to the APK.
 See [docs/RELEASE_AUTOMATION.md](docs/RELEASE_AUTOMATION.md) for triggering and distribution
 restrictions.
+
+## Signed release APK distribution
+
+The separate manual signed-release workflow builds only when a persistent release keystore and
+its pinned certificate fingerprint are configured as GitHub Actions secrets. It verifies the
+release APK signature, application/version identity, and bundled ONNX checksum before publishing
+a unique prerelease. See [docs/RELEASE_AUTOMATION.md](docs/RELEASE_AUTOMATION.md) for the
+keystore lifecycle, required secrets, and installation guidance.
