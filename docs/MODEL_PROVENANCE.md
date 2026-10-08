@@ -13,7 +13,8 @@
   `8695749d49be938a0d4cd233a9a22f554064de7cae6c41cf48f0317bd4b86686`
 - Source `vocab.json` SHA-256:
   `c6cf8098e45c6c94a2ad0afc2814e3a8fc446383fb0005ecef8df5d3eb09efb0`
-- License: CC BY-NC 4.0 (non-commercial); this is a release/distribution gate.
+- License: Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0).
+- Official license: https://creativecommons.org/licenses/by-nc/4.0/
 
 ## Bundled ONNX conversion
 
