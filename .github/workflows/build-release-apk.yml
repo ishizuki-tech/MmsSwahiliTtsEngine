@@ -1,0 +1,221 @@
+name: Build signed release APK and publish prerelease
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_title:
+        description: Optional title suffix for the prerelease
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mms-swahili-tts-signed-releases
+  cancel-in-progress: false
+
+jobs:
+  build-sign-and-publish:
+    name: Build, sign, verify, and publish prerelease
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out source and LFS assets
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          fetch-depth: 0
+
+      - name: Set up Java required by Gradle
+        uses: actions/setup-java@v5
+        with:
+          distribution: jetbrains
+          java-version: "25"
+          cache: gradle
+
+      - name: Install and verify required Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [[ ! -x "$SDKMANAGER" ]]; then
+            SDKMANAGER=""
+            for candidate in "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager; do
+              if [[ -x "$candidate" ]]; then
+                SDKMANAGER="$candidate"
+                break
+              fi
+            done
+          fi
+          if [[ -z "$SDKMANAGER" ]]; then
+            echo "No executable SDK Manager found under $ANDROID_HOME/cmdline-tools." >&2
+            echo "Expected cmdline-tools/latest/bin/sdkmanager or a versioned equivalent." >&2
+            find "$ANDROID_HOME/cmdline-tools" -maxdepth 3 -type f -name sdkmanager -print >&2 || true
+            exit 1
+          fi
+          echo "Using Android SDK Manager: $SDKMANAGER"
+          "$SDKMANAGER" --version
+          set +o pipefail
+          yes | "$SDKMANAGER" --licenses >/dev/null
+          set -o pipefail
+          "$SDKMANAGER" --install "platforms;android-36" "build-tools;36.0.0"
+          test -d "$ANDROID_HOME/platforms/android-36"
+          test -x "$ANDROID_HOME/build-tools/36.0.0/aapt"
+          test -x "$ANDROID_HOME/build-tools/36.0.0/apksigner"
+
+      - name: Verify the LFS model asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL=app/src/main/assets/mms-swh-vits.onnx
+          EXPECTED_BYTES=114017796
+          EXPECTED_SHA256=af4f2e2174960af06a7a7d07810ea7eb2d78fba827be7690abb230159717d250
+          test "$(stat --format=%s "$MODEL")" = "$EXPECTED_BYTES"
+          test "$(sha256sum "$MODEL" | awk '{print $1}')" = "$EXPECTED_SHA256"
+
+      - name: Validate signing configuration and decode keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_RELEASE_CERT_SHA256: ${{ secrets.ANDROID_RELEASE_CERT_SHA256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for secret_name in \
+            ANDROID_KEYSTORE_BASE64 \
+            ANDROID_KEYSTORE_PASSWORD \
+            ANDROID_KEY_ALIAS \
+            ANDROID_KEY_PASSWORD \
+            ANDROID_RELEASE_CERT_SHA256; do
+            if [[ -z "${!secret_name:-}" ]]; then
+              echo "::error::Required repository secret ${secret_name} is not configured." >&2
+              exit 1
+            fi
+          done
+          EXPECTED_CERT_SHA256=$(printf '%s' "$ANDROID_RELEASE_CERT_SHA256" | tr -d '[:space:]:' | tr '[:lower:]' '[:upper:]')
+          if [[ ! "$EXPECTED_CERT_SHA256" =~ ^[0-9A-F]{64}$ ]]; then
+            echo "::error::ANDROID_RELEASE_CERT_SHA256 must be a SHA-256 certificate fingerprint." >&2
+            exit 1
+          fi
+          KEYSTORE_PATH="$RUNNER_TEMP/mms-swahili-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.jks"
+          umask 077
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          test -s "$KEYSTORE_PATH"
+          chmod 600 "$KEYSTORE_PATH"
+          printf 'RELEASE_STORE_FILE=%s\n' "$KEYSTORE_PATH" >> "$GITHUB_ENV"
+          printf 'EXPECTED_CERT_SHA256=%s\n' "$EXPECTED_CERT_SHA256" >> "$GITHUB_ENV"
+
+      - name: Build and run JVM tests
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        shell: bash
+        run: ./gradlew :app:testDebugUnitTest :app:assembleRelease --no-daemon
+
+      - name: Verify signed release APK and capture metadata
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK_SOURCE=app/build/outputs/apk/release/app-release.apk
+          APK=dist/MmsSwahiliTtsEngine-release.apk
+          CHECKSUM=dist/MmsSwahiliTtsEngine-release.apk.sha256
+          MODEL_ASSET=assets/mms-swh-vits.onnx
+          EXPECTED_MODEL_SHA256=af4f2e2174960af06a7a7d07810ea7eb2d78fba827be7690abb230159717d250
+          AAPT="$ANDROID_HOME/build-tools/36.0.0/aapt"
+          APKSIGNER="$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          test -f "$APK_SOURCE"
+          mkdir -p dist
+          cp "$APK_SOURCE" "$APK"
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+          ACTUAL_CERT_SHA256=$("$APKSIGNER" verify --print-certs "$APK" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | tr -d '[:space:]:' | tr '[:lower:]' '[:upper:]')
+          test "$ACTUAL_CERT_SHA256" = "$EXPECTED_CERT_SHA256"
+          "$AAPT" dump badging "$APK" | grep -F "package: name='com.negi.mmsswahilitts' versionCode='1' versionName='0.1.0'"
+          unzip -Z1 "$APK" | grep -Fx "$MODEL_ASSET"
+          unzip -p "$APK" "$MODEL_ASSET" | sha256sum | awk '{print $1}' > dist/model-asset.sha256
+          test "$(cat dist/model-asset.sha256)" = "$EXPECTED_MODEL_SHA256"
+          (
+            cd "$(dirname "$APK")"
+            sha256sum "$(basename "$APK")" > "$(basename "$CHECKSUM")"
+          )
+          APK_SHA256=$(awk '{print $1}' "$CHECKSUM")
+          VERSION_NAME=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts)
+          VERSION_CODE=$(sed -n 's/.*versionCode = \([0-9][0-9]*\).*/\1/p' app/build.gradle.kts)
+          TAG="release-v${VERSION_NAME}-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA::12}"
+          BUILD_DATE=$(date --utc +%Y-%m-%dT%H:%M:%SZ)
+          {
+            echo "tag=$TAG"
+            echo "apk_sha256=$APK_SHA256"
+            echo "version_name=$VERSION_NAME"
+            echo "version_code=$VERSION_CODE"
+            echo "build_date=$BUILD_DATE"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create QR code for the release APK
+        env:
+          TAG: ${{ steps.metadata.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          QR_VENV="$RUNNER_TEMP/qr-release-venv"
+          QR_ASSET=dist/MmsSwahiliTtsEngine-release-download-qr.png
+          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/MmsSwahiliTtsEngine-release.apk"
+          python3 -m venv "$QR_VENV"
+          "$QR_VENV/bin/python" -m pip install --disable-pip-version-check --no-cache-dir 'qrcode[pil]==8.2'
+          "$QR_VENV/bin/python" - "$DOWNLOAD_URL" "$QR_ASSET" <<'PY'
+          import qrcode
+          import sys
+          qrcode.make(sys.argv[1]).save(sys.argv[2])
+          PY
+          test -s "$QR_ASSET"
+
+      - name: Create signed release prerelease and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.metadata.outputs.tag }}
+          TITLE_SUFFIX: ${{ inputs.release_title }}
+          APK_SHA256: ${{ steps.metadata.outputs.apk_sha256 }}
+          VERSION_NAME: ${{ steps.metadata.outputs.version_name }}
+          VERSION_CODE: ${{ steps.metadata.outputs.version_code }}
+          BUILD_DATE: ${{ steps.metadata.outputs.build_date }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TITLE="MMS Swahili TTS signed release ${TAG}"
+          if [[ -n "$TITLE_SUFFIX" ]]; then TITLE="$TITLE — $TITLE_SUFFIX"; fi
+          DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/MmsSwahiliTtsEngine-release.apk"
+          QR_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/MmsSwahiliTtsEngine-release-download-qr.png"
+          cat > dist/release-notes.md <<EOF
+          Signed release APK built from commit ${GITHUB_SHA} at ${BUILD_DATE}.
+
+          [Download the signed release APK](${DOWNLOAD_URL})
+
+          ![QR code for the signed release APK download](${QR_URL})
+
+          APK SHA-256: \`${APK_SHA256}\`
+
+          Version: ${VERSION_NAME} (versionCode ${VERSION_CODE})
+
+          This APK bundles Meta's MMS Swahili model, licensed CC BY-NC 4.0.
+          It is for non-commercial use only; see the repository provenance documentation.
+          EOF
+          gh release create "$TAG" dist/MmsSwahiliTtsEngine-release.apk dist/MmsSwahiliTtsEngine-release.apk.sha256 dist/MmsSwahiliTtsEngine-release-download-qr.png \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "$TITLE" \
+            --notes-file dist/release-notes.md
+
+      - name: Remove temporary signing material
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          KEYSTORE_PATH="$RUNNER_TEMP/mms-swahili-release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.jks"
+          if [[ -f "$KEYSTORE_PATH" ]]; then
+            shred --remove "$KEYSTORE_PATH" 2>/dev/null || rm -f "$KEYSTORE_PATH"
+          fi
